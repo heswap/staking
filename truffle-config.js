@@ -3,6 +3,12 @@ require('dotenv').config()
 const HDWalletProvider = require('@truffle/hdwallet-provider');
 
 module.exports = {
+  plugins: [
+    'truffle-plugin-verify'
+  ],
+  api_keys:{
+    hecoinfo: process.env.HECO_API_KEY
+  },
   networks: {
     testnet: {
       provider: () => new HDWalletProvider(process.env.MNEMONIC, 'https://http-testnet.hecochain.com'),
