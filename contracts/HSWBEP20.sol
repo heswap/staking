@@ -4,7 +4,7 @@ pragma solidity >=0.4.0;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Context.sol";
-import "./IBEP20.sol";
+import "./libs/IBEP20.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
 
@@ -32,7 +32,10 @@ import "@openzeppelin/contracts/utils/Address.sol";
  * functions have been added to mitigate the well-known issues around setting
  * allowances. See {IBEP20-approve}.
  */
-contract BEP20 is Context, IBEP20, Ownable {
+contract HSWBEP20 is Context, IBEP20, Ownable {
+	uint256 private constant _preMineSupply = 10000000 * 1e18;
+    uint256 private constant _maxSupply = 700000000 * 1e18;
+
     using SafeMath for uint256;
     using Address for address;
 
@@ -59,6 +62,8 @@ contract BEP20 is Context, IBEP20, Ownable {
         _name = name;
         _symbol = symbol;
         _decimals = 18;
+
+		_mint(msg.sender, _preMineSupply);
     }
 
     /**
@@ -94,6 +99,14 @@ contract BEP20 is Context, IBEP20, Ownable {
      */
     function totalSupply() public override view returns (uint256) {
         return _totalSupply;
+    }
+
+	function preMineSupply() public view returns (uint256) {
+        return _preMineSupply;
+    }
+
+    function maxSupply() public view returns (uint256) {
+        return _maxSupply;
     }
 
     /**
@@ -250,8 +263,11 @@ contract BEP20 is Context, IBEP20, Ownable {
      *
      * - `to` cannot be the zero address.
      */
-    function _mint(address account, uint256 amount) internal {
+    function _mint(address account, uint256 amount) internal returns(bool) {
         require(account != address(0), "BEP20: mint to the zero address");
+		if (amount.add(_totalSupply) > _maxSupply) {
+            return false;
+        }
 
         _totalSupply = _totalSupply.add(amount);
         _balances[account] = _balances[account].add(amount);

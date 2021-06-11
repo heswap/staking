@@ -1,6 +1,6 @@
 pragma solidity 0.6.12;
 
-import "./libs/BEP20.sol";
+import "./HSWBEP20.sol";
 
 import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
@@ -222,7 +222,7 @@ library EnumerableSet {
 }
 
 // Heswap token with Governance.
-contract HSWToken is BEP20('Heswap', 'HSW') {
+contract HSWToken is HSWBEP20('Heswap', 'HSW') {
     using EnumerableSet for EnumerableSet.AddressSet;
     EnumerableSet.AddressSet private _minters;
 
