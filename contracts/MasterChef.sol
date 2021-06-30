@@ -237,33 +237,34 @@ contract MasterChef is Ownable, ReentrancyGuard {
     }
 
         // Pay pending HSWs.
-    function payPendingHSW(uint256 _pid) internal {
+    function payPendingHSW(uint256 _pid, address _user) internal {
         PoolInfo storage pool = poolInfo[_pid];
-        UserInfo storage user = userInfo[_pid][msg.sender];
+        UserInfo storage user = userInfo[_pid][_user];
 
         uint256 pending = user.amount.mul(pool.accHSWPerShare).div(1e12).sub(user.rewardDebt);
         if (pending > 0) {
             // send rewards
-            safeHSWTransfer(msg.sender, pending);
-            payReferralCommission(msg.sender, pending);
+            safeHSWTransfer(_user, pending);
+            payReferralCommission(_user, pending);
         }
     }
 
     // Deposit LP tokens to MasterChef for HSW allocation.
     function deposit(uint256 _pid, uint256 _amount, address _referrer) public nonReentrant {
-
-        require (_pid != 0, 'deposit HSW by staking');
-
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][msg.sender];
         updatePool(_pid);
         if(_amount > 0 && address(heswapReferral) != address(0) && _referrer != address(0) && _referrer != msg.sender){
             heswapReferral.recordReferral(msg.sender, _referrer);
         }
-        payPendingHSW(_pid);
+        payPendingHSW(_pid, msg.sender);
         if(_amount > 0){
             pool.lpToken.safeTransferFrom(address(msg.sender), address(this), _amount);
             user.amount = user.amount.add(_amount);
+			if(_pid == 0){
+				depositedHsw = depositedHsw.add(_amount);
+			}
+
         }
         user.rewardDebt = user.amount.mul(pool.accHSWPerShare).div(1e12);
         emit Deposit(msg.sender, _pid, _amount);
@@ -272,59 +273,21 @@ contract MasterChef is Ownable, ReentrancyGuard {
     // Withdraw LP tokens from MasterChef.
     function withdraw(uint256 _pid, uint256 _amount) public nonReentrant {
 
-        require (_pid != 0, 'withdraw HSW by unstaking');
-
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][msg.sender];
         require(user.amount >= _amount, "withdraw: not good");
         updatePool(_pid);
-        payPendingHSW(_pid);
+        payPendingHSW(_pid, msg.sender);
         if(_amount > 0){
             user.amount = user.amount.sub(_amount);
             pool.lpToken.safeTransfer(address(msg.sender), _amount);
+			if(_pid == 0){
+				depositedHsw = depositedHsw.sub(_amount);
+			}
         }
         
         user.rewardDebt = user.amount.mul(pool.accHSWPerShare).div(1e12);
         emit Withdraw(msg.sender, _pid, _amount);
-    }
-
-        // Stake HSW tokens to MasterChef
-    function enterStaking(uint256 _amount) public {
-        PoolInfo storage pool = poolInfo[0];
-        UserInfo storage user = userInfo[0][msg.sender];
-        updatePool(0);
-        if (user.amount > 0) {
-            uint256 pending = user.amount.mul(pool.accHSWPerShare).div(1e12).sub(user.rewardDebt);
-            if(pending > 0) {
-                safeHSWTransfer(msg.sender, pending);
-            }
-        }
-        if(_amount > 0) {
-            pool.lpToken.safeTransferFrom(address(msg.sender), address(this), _amount);
-            user.amount = user.amount.add(_amount);
-            depositedHsw = depositedHsw.add(_amount);
-        }
-        user.rewardDebt = user.amount.mul(pool.accHSWPerShare).div(1e12);
-        emit Deposit(msg.sender, 0, _amount);
-    }
-
-    // Withdraw HSW tokens from STAKING.
-    function leaveStaking(uint256 _amount) public {
-        PoolInfo storage pool = poolInfo[0];
-        UserInfo storage user = userInfo[0][msg.sender];
-        require(user.amount >= _amount, "withdraw: not good");
-        updatePool(0);
-        uint256 pending = user.amount.mul(pool.accHSWPerShare).div(1e12).sub(user.rewardDebt);
-        if(pending > 0) {
-            safeHSWTransfer(msg.sender, pending);
-        }
-        if(_amount > 0) {
-            user.amount = user.amount.sub(_amount);
-            pool.lpToken.safeTransfer(address(msg.sender), _amount);
-            depositedHsw = depositedHsw.sub(_amount);
-        }
-        user.rewardDebt = user.amount.mul(pool.accHSWPerShare).div(1e12);
-        emit Withdraw(msg.sender, 0, _amount);
     }
 
     // Withdraw without caring about rewards. EMERGENCY ONLY.
@@ -366,15 +329,29 @@ contract MasterChef is Ownable, ReentrancyGuard {
 
     // Pay referral commission to the referrer who referred this user.
     function payReferralCommission(address _user, uint256 _pending) internal {
-        if (address(heswapReferral) != address(0) && referralCommissionRate > 0) {
-            address referrer = heswapReferral.getReferrer(_user);
-            uint256 commissionAmount = _pending.mul(referralCommissionRate).div(10000);
+		if (referralCommissionRate > 0) {
+			if (address(heswapReferral) != address(0)){
+				address referrer = heswapReferral.getReferrer(_user);
+	            uint256 commissionAmount = _pending.mul(referralCommissionRate).div(10000);
 
-            if (referrer != address(0) && commissionAmount > 0) {
-                HSW.mint(referrer, commissionAmount);
-                heswapReferral.recordReferralCommission(referrer, commissionAmount);
-                emit ReferralCommissionPaid(_user, referrer, commissionAmount);
-            }
-        }
+		        if (commissionAmount > 0) {
+					if (referrer != address(0)){
+						HSW.mint(referrer, commissionAmount);
+					    heswapReferral.recordReferralCommission(referrer, commissionAmount);
+						emit ReferralCommissionPaid(_user, referrer, commissionAmount);
+					}else{
+						HSW.mint(safuaddr, commissionAmount);
+						heswapReferral.recordReferralCommission(safuaddr, commissionAmount);
+						emit ReferralCommissionPaid(_user, safuaddr, commissionAmount);
+					}
+				}
+			}else{
+				uint256 commissionAmount = _pending.mul(referralCommissionRate).div(10000);
+				if (commissionAmount > 0){
+					HSW.mint(safuaddr, commissionAmount);
+					emit ReferralCommissionPaid(_user, safuaddr, commissionAmount);
+				}
+			}
+		}
     }
 }
