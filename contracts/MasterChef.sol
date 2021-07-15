@@ -39,13 +39,22 @@ contract MasterChef is Ownable, ReentrancyGuard {
         //   3. User's `amount` gets updated.
         //   4. User's `rewardDebt` gets updated.
     }
+
     // Info of each pool.
     struct PoolInfo {
         IBEP20 lpToken; // Address of LP token contract.
         uint256 allocPoint; // How many allocation points assigned to this pool. HSWs to distribute per block.
+        uint256 bonusPoint; // How many bonus points assigned to this pool.
         uint256 lastRewardBlock; // Last block number that HSWs distribution occurs.
         uint256 accHSWPerShare; // Accumulated HSWs per share, times 1e12. See below.
     }
+
+	struct BonusInfo {
+		IBPE20 bonusToken;
+		uint256 lastRewardBlock;
+		uint256 accBonusPerShare;
+	}
+
     // The HSW TOKEN!
     HSWToken public HSW;
     //Pools, Farms, Dev, Refs percent decimals
@@ -70,14 +79,20 @@ contract MasterChef is Ownable, ReentrancyGuard {
     IMigratorChef public migrator;
     // Info of each pool.
     PoolInfo[] public poolInfo;
+	// Info of each bonus.
+	BonusInfo[] public bonusInfo;
+    // Bonus info of each user that stakes LP tokens.
+	mapping(uint256 => mapping(address => UserInfo)) public userBonusInfo;
+	// Total bonus share
+	uint256 public totalBonusShare = 0;
     // Info of each user that stakes LP tokens.
     mapping(uint256 => mapping(address => UserInfo)) public userInfo;
     // Total allocation poitns. Must be the sum of all allocation points in all pools.
     uint256 public totalAllocPoint = 0;
+    // Total bonus poitns. Must be the sum of all bonus points in all pools.
+    uint256 public totalBonusPoint = 0;
     // The block number when HSW mining starts.
     uint256 public startBlock;
-    // Deposited amount HSW in MasterChef
-    uint256 public depositedHsw;
 
     // Heswap referral contract address.
     IHeswapReferral public heswapReferral;
@@ -112,14 +127,6 @@ contract MasterChef is Ownable, ReentrancyGuard {
         safuPercent = _safuPercent;
         lastBlockDevWithdraw = _startBlock;
         
-        // staking pool
-        poolInfo.push(PoolInfo({
-            lpToken: _HSW,
-            allocPoint: 1000,
-            lastRewardBlock: startBlock,
-            accHSWPerShare: 0
-        }));
-
         totalAllocPoint = 1000;
 
     }
@@ -143,16 +150,19 @@ contract MasterChef is Ownable, ReentrancyGuard {
 
     // Add a new lp to the pool. Can only be called by the owner.
     // XXX DO NOT add the same LP token more than once. Rewards will be messed up if you do.
-    function add( uint256 _allocPoint, IBEP20 _lpToken, bool _withUpdate) public onlyOwner {
+    function add(uint256 _allocPoint, uint256 _bonusPoint, IBEP20 _lpToken, bool _withUpdate) public onlyOwner {
         if (_withUpdate) {
             massUpdatePools();
         }
         uint256 lastRewardBlock = block.number > startBlock ? block.number : startBlock;
         totalAllocPoint = totalAllocPoint.add(_allocPoint);
+        totalBonusPoint = totalBonusPoint.add(_bonusPoint);
+		
         poolInfo.push(
             PoolInfo({
                 lpToken: _lpToken,
                 allocPoint: _allocPoint,
+				bonusPoint: _bonusPoint,
                 lastRewardBlock: lastRewardBlock,
                 accHSWPerShare: 0
             })
@@ -196,9 +206,6 @@ contract MasterChef is Ownable, ReentrancyGuard {
         UserInfo storage user = userInfo[_pid][_user];
         uint256 accHSWPerShare = pool.accHSWPerShare;
         uint256 lpSupply = pool.lpToken.balanceOf(address(this));
-        if (_pid == 0){
-            lpSupply = depositedHsw;
-        }
         if (block.number > pool.lastRewardBlock && lpSupply != 0) {
             uint256 multiplier = getMultiplier(pool.lastRewardBlock, block.number);
             uint256 HSWReward = multiplier.mul(HSWPerBlock).mul(pool.allocPoint).div(totalAllocPoint).mul(stakingPercent).div(percentDec);
@@ -206,6 +213,19 @@ contract MasterChef is Ownable, ReentrancyGuard {
         }
         return user.amount.mul(accHSWPerShare).div(1e12).sub(user.rewardDebt);
     }
+
+    // View function to see pending bonus on frontend.
+    function pendingBonus(uint256 _pid, address _user) external view returns (uint256[] memory){
+        PoolInfo storage pool = poolInfo[_pid];
+		uint256[] memory values = uint256[](bonusInfo.length);
+		if (pool.bonusPoint > 0){
+			for(uint256 i = 0; i < bonusInfo.length; i ++) {
+				UserInfo storage user = userBonusInfo[i][_user];
+				values[i] = user.amount.mul(bonusInfo[i].accBonusPerShare).div(1e12).sub(user.rewardDebt);	
+			}
+		}
+		return values;
+    }	
 
     // Update reward vairables for all pools. Be careful of gas spending!
     function massUpdatePools() public {
@@ -222,9 +242,6 @@ contract MasterChef is Ownable, ReentrancyGuard {
             return;
         }
         uint256 lpSupply = pool.lpToken.balanceOf(address(this));
-        if (_pid == 0){
-            lpSupply = depositedHsw;
-        }
         if (lpSupply <= 0) {
             pool.lastRewardBlock = block.number;
             return;
@@ -236,7 +253,15 @@ contract MasterChef is Ownable, ReentrancyGuard {
         pool.lastRewardBlock = block.number;
     }
 
-        // Pay pending HSWs.
+    // Update bonus
+    function updateBonus(uint256 _pid, uint256 _amount) public {
+        BonusInfo storage bonusPool = bonusInfo[_pid];
+		bonusPool.bonusToken.safeTransferFrom(address(msg.sender), address(this), _amount);
+        bonusPool.accBonusPerShare = bonusPool.accBonusPerShare.add(_amount.mul(1e12).div(totalBonusShare));
+        pool.lastRewardBlock = block.number;
+	}
+
+    // Pay pending HSWs.
     function payPendingHSW(uint256 _pid, address _user) internal {
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][_user];
@@ -247,6 +272,19 @@ contract MasterChef is Ownable, ReentrancyGuard {
             safeHSWTransfer(_user, pending);
             payReferralCommission(_user, pending);
         }
+    }
+
+    // Pay pending Bonus.
+    function payPendingBonus(uint256 _pid, address _user) internal {
+        PoolInfo storage pool = poolInfo[_pid];
+		if (pool.bonusPoint > 0){
+			for(uint256 i = 0; i < bonusInfo.length; i ++) {
+				BonusInfo storage bonusPool = bonusInfo[i];
+				UserInfo storage user = userBonusInfo[i][_user];
+				uint256 pending = user.amount.mul(bonusPool.accBonusPerShare).div(1e12).sub(user.rewardDebt);
+				bonusPool.bonusToken.safeTransfer(address(this), address(_user), pending);
+			}
+		}
     }
 
     // Deposit LP tokens to MasterChef for HSW allocation.
@@ -261,12 +299,13 @@ contract MasterChef is Ownable, ReentrancyGuard {
         if(_amount > 0){
             pool.lpToken.safeTransferFrom(address(msg.sender), address(this), _amount);
             user.amount = user.amount.add(_amount);
-			if(_pid == 0){
-				depositedHsw = depositedHsw.add(_amount);
-			}
-
         }
         user.rewardDebt = user.amount.mul(pool.accHSWPerShare).div(1e12);
+
+		if (pool.bonusPoint > 0){
+			payPendingBonus(_pid, msg.sender);	
+		}
+
         emit Deposit(msg.sender, _pid, _amount);
     }
 
@@ -281,9 +320,6 @@ contract MasterChef is Ownable, ReentrancyGuard {
         if(_amount > 0){
             user.amount = user.amount.sub(_amount);
             pool.lpToken.safeTransfer(address(msg.sender), _amount);
-			if(_pid == 0){
-				depositedHsw = depositedHsw.sub(_amount);
-			}
         }
         
         user.rewardDebt = user.amount.mul(pool.accHSWPerShare).div(1e12);
