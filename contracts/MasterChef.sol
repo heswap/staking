@@ -49,11 +49,10 @@ contract MasterChef is Ownable, ReentrancyGuard {
         uint256 accHSWPerShare; // Accumulated HSWs per share, times 1e12. See below.
     }
 
-	struct BonusInfo {
-		IBPE20 bonusToken;
-		uint256 lastRewardBlock;
-		uint256 accBonusPerShare;
-	}
+    struct BonusInfo {
+        IBEP20 bonusToken;
+        uint256 lastRewardBlock;
+    }
 
     // The HSW TOKEN!
     HSWToken public HSW;
@@ -79,12 +78,12 @@ contract MasterChef is Ownable, ReentrancyGuard {
     IMigratorChef public migrator;
     // Info of each pool.
     PoolInfo[] public poolInfo;
-	// Info of each bonus.
-	BonusInfo[] public bonusInfo;
-    // Bonus info of each user that stakes LP tokens.
-	mapping(uint256 => mapping(address => UserInfo)) public userBonusInfo;
-	// Total bonus share
-	uint256 public totalBonusShare = 0;
+    // Info of each bonus.
+    BonusInfo[] public bonusInfo;
+    // mapping pid to bonus accPerShare.
+    mapping(uint256 => uint256[]) public poolBonusPerShare;
+    // user bonus debt
+    mapping(uint256 => mapping(address => uint256)) public userBonusDebt;
     // Info of each user that stakes LP tokens.
     mapping(uint256 => mapping(address => UserInfo)) public userInfo;
     // Total allocation poitns. Must be the sum of all allocation points in all pools.
@@ -104,7 +103,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
     event Deposit(address indexed user, uint256 indexed pid, uint256 amount);
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
     event EmergencyWithdraw(address indexed user, uint256 indexed pid, uint256 amount);
-	event EmissionRateUpdated(address indexed caller, uint256 previousAmount, uint256 newAmount);
+    event EmissionRateUpdated(address indexed caller, uint256 previousAmount, uint256 newAmount);
     event ReferralCommissionPaid(address indexed user, address indexed referrer, uint256 commissionAmount);
 
     constructor(
@@ -157,16 +156,28 @@ contract MasterChef is Ownable, ReentrancyGuard {
         uint256 lastRewardBlock = block.number > startBlock ? block.number : startBlock;
         totalAllocPoint = totalAllocPoint.add(_allocPoint);
         totalBonusPoint = totalBonusPoint.add(_bonusPoint);
-		
+        
         poolInfo.push(
             PoolInfo({
                 lpToken: _lpToken,
                 allocPoint: _allocPoint,
-				bonusPoint: _bonusPoint,
+                bonusPoint: _bonusPoint,
                 lastRewardBlock: lastRewardBlock,
                 accHSWPerShare: 0
             })
         );
+    }
+
+    function addBonus(IBEP20 _bonusToken) public onlyOwner {
+        uint256 lastRewardBlock = block.number > startBlock ? block.number : startBlock;
+        bonusInfo.push(BonusInfo({bonusToken: _bonusToken, lastRewardBlock: lastRewardBlock}));
+        for(uint256 i = 0; i < poolInfo.length; i ++){
+            PoolInfo storage pool = poolInfo[i];
+            if (pool.bonusPoint > 0){
+                uint256[] storage bonusPerShare = poolBonusPerShare[i];
+                bonusPerShare.push(0);
+            }
+        }
     }
 
     // Update the given pool's HSW allocation point. Can only be called by the owner.
@@ -217,15 +228,16 @@ contract MasterChef is Ownable, ReentrancyGuard {
     // View function to see pending bonus on frontend.
     function pendingBonus(uint256 _pid, address _user) external view returns (uint256[] memory){
         PoolInfo storage pool = poolInfo[_pid];
-		uint256[] memory values = uint256[](bonusInfo.length);
-		if (pool.bonusPoint > 0){
-			for(uint256 i = 0; i < bonusInfo.length; i ++) {
-				UserInfo storage user = userBonusInfo[i][_user];
-				values[i] = user.amount.mul(bonusInfo[i].accBonusPerShare).div(1e12).sub(user.rewardDebt);	
-			}
-		}
-		return values;
-    }	
+        UserInfo storage user = userInfo[_pid][_user];
+        uint256[] memory values = new uint256[](bonusInfo.length);
+        if (pool.bonusPoint > 0){
+            uint256[] storage bonusPerShare = poolBonusPerShare[_pid];
+            for(uint256 i = 0; i < bonusInfo.length; i ++) {
+                values[i] = user.amount.mul(bonusPerShare[i]).div(1e12).sub(userBonusDebt[i][_user]);
+            }
+        }
+        return values;
+    }    
 
     // Update reward vairables for all pools. Be careful of gas spending!
     function massUpdatePools() public {
@@ -255,36 +267,52 @@ contract MasterChef is Ownable, ReentrancyGuard {
 
     // Update bonus
     function updateBonus(uint256 _pid, uint256 _amount) public {
+		require(_pid < bonusInfo.length, "_pid must be less than bonusInfo length");
         BonusInfo storage bonusPool = bonusInfo[_pid];
-		bonusPool.bonusToken.safeTransferFrom(address(msg.sender), address(this), _amount);
-        bonusPool.accBonusPerShare = bonusPool.accBonusPerShare.add(_amount.mul(1e12).div(totalBonusShare));
-        pool.lastRewardBlock = block.number;
-	}
+        bonusPool.bonusToken.safeTransferFrom(address(msg.sender), address(this), _amount);
+        for(uint256 i = 0; i < poolInfo.length; i ++){
+            PoolInfo storage pool = poolInfo[i];
+            uint256 lpSupply = pool.lpToken.balanceOf(address(this));
+            if(lpSupply <= 0){
+                continue;
+            }
+            if (pool.bonusPoint > 0){
+                uint256[] storage bonusPerShare = poolBonusPerShare[i];
+                bonusPerShare[_pid] = bonusPerShare[_pid].add(_amount.mul(pool.bonusPoint).div(totalBonusPoint).mul(1e12).div(lpSupply));
+            }
+        }    
+		bonusPool.lastRewardBlock = block.number;
+    }
 
     // Pay pending HSWs.
     function payPendingHSW(uint256 _pid, address _user) internal {
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][_user];
-
-        uint256 pending = user.amount.mul(pool.accHSWPerShare).div(1e12).sub(user.rewardDebt);
-        if (pending > 0) {
-            // send rewards
-            safeHSWTransfer(_user, pending);
-            payReferralCommission(_user, pending);
+        if (pool.bonusPoint > 0){
+            uint256 pending = user.amount.mul(pool.accHSWPerShare).div(1e12).sub(user.rewardDebt);
+            if (pending > 0) {
+                // send rewards
+                safeHSWTransfer(_user, pending);
+                payReferralCommission(_user, pending);
+            }
         }
     }
 
     // Pay pending Bonus.
     function payPendingBonus(uint256 _pid, address _user) internal {
         PoolInfo storage pool = poolInfo[_pid];
-		if (pool.bonusPoint > 0){
-			for(uint256 i = 0; i < bonusInfo.length; i ++) {
-				BonusInfo storage bonusPool = bonusInfo[i];
-				UserInfo storage user = userBonusInfo[i][_user];
-				uint256 pending = user.amount.mul(bonusPool.accBonusPerShare).div(1e12).sub(user.rewardDebt);
-				bonusPool.bonusToken.safeTransfer(address(this), address(_user), pending);
-			}
-		}
+        UserInfo storage user = userInfo[_pid][_user];
+        if (pool.bonusPoint > 0){
+			uint256[] storage bonusPerShare = poolBonusPerShare[_pid];
+			require(bonusPerShare.length == bonusInfo.length, "bonusPerShare.length must equal to bonusInof length");
+            for(uint256 i = 0; i < bonusInfo.length; i ++) {  
+                uint256 pending = user.amount.mul(bonusPerShare[i]).div(1e12).sub(userBonusDebt[i][_user]);
+                if (pending > 0) {
+                    BonusInfo storage bonusPool = bonusInfo[i];
+                    bonusPool.bonusToken.safeTransferFrom(address(this), address(_user), pending);
+                }
+            }
+        }
     }
 
     // Deposit LP tokens to MasterChef for HSW allocation.
@@ -301,10 +329,13 @@ contract MasterChef is Ownable, ReentrancyGuard {
             user.amount = user.amount.add(_amount);
         }
         user.rewardDebt = user.amount.mul(pool.accHSWPerShare).div(1e12);
-
-		if (pool.bonusPoint > 0){
-			payPendingBonus(_pid, msg.sender);	
-		}
+        if (pool.bonusPoint > 0){
+            payPendingBonus(_pid, msg.sender);
+			uint256[] storage bonusPerShare = poolBonusPerShare[_pid];
+            for(uint256 i = 0; i < bonusInfo.length; i ++) {  
+				userBonusDebt[i][msg.sender] = user.amount.mul(bonusPerShare[i]).div(1e12);
+            }
+        }
 
         emit Deposit(msg.sender, _pid, _amount);
     }
@@ -320,9 +351,15 @@ contract MasterChef is Ownable, ReentrancyGuard {
         if(_amount > 0){
             user.amount = user.amount.sub(_amount);
             pool.lpToken.safeTransfer(address(msg.sender), _amount);
-        }
-        
+        } 
         user.rewardDebt = user.amount.mul(pool.accHSWPerShare).div(1e12);
+        if (pool.bonusPoint > 0){
+            payPendingBonus(_pid, msg.sender);
+			uint256[] storage bonusPerShare = poolBonusPerShare[_pid];
+            for(uint256 i = 0; i < bonusInfo.length; i ++) {  
+				userBonusDebt[i][msg.sender] = user.amount.mul(bonusPerShare[i]).div(1e12);
+            }
+        }
         emit Withdraw(msg.sender, _pid, _amount);
     }
 
@@ -334,6 +371,9 @@ contract MasterChef is Ownable, ReentrancyGuard {
         emit EmergencyWithdraw(msg.sender, _pid, user.amount);
         user.amount = 0;
         user.rewardDebt = 0;
+		if(pool.bonusPoint > 0){
+			
+		}
     }
 
     // Safe HSW transfer function, just in case if rounding error causes pool to not have enough HSWs.
@@ -365,29 +405,29 @@ contract MasterChef is Ownable, ReentrancyGuard {
 
     // Pay referral commission to the referrer who referred this user.
     function payReferralCommission(address _user, uint256 _pending) internal {
-		if (referralCommissionRate > 0) {
-			if (address(heswapReferral) != address(0)){
-				address referrer = heswapReferral.getReferrer(_user);
-	            uint256 commissionAmount = _pending.mul(referralCommissionRate).div(10000);
+        if (referralCommissionRate > 0) {
+            if (address(heswapReferral) != address(0)){
+                address referrer = heswapReferral.getReferrer(_user);
+                uint256 commissionAmount = _pending.mul(referralCommissionRate).div(10000);
 
-		        if (commissionAmount > 0) {
-					if (referrer != address(0)){
-						HSW.mint(referrer, commissionAmount);
-					    heswapReferral.recordReferralCommission(referrer, commissionAmount);
-						emit ReferralCommissionPaid(_user, referrer, commissionAmount);
-					}else{
-						HSW.mint(safuaddr, commissionAmount);
-						heswapReferral.recordReferralCommission(safuaddr, commissionAmount);
-						emit ReferralCommissionPaid(_user, safuaddr, commissionAmount);
-					}
-				}
-			}else{
-				uint256 commissionAmount = _pending.mul(referralCommissionRate).div(10000);
-				if (commissionAmount > 0){
-					HSW.mint(safuaddr, commissionAmount);
-					emit ReferralCommissionPaid(_user, safuaddr, commissionAmount);
-				}
-			}
-		}
+                if (commissionAmount > 0) {
+                    if (referrer != address(0)){
+                        HSW.mint(referrer, commissionAmount);
+                        heswapReferral.recordReferralCommission(referrer, commissionAmount);
+                        emit ReferralCommissionPaid(_user, referrer, commissionAmount);
+                    }else{
+                        HSW.mint(safuaddr, commissionAmount);
+                        heswapReferral.recordReferralCommission(safuaddr, commissionAmount);
+                        emit ReferralCommissionPaid(_user, safuaddr, commissionAmount);
+                    }
+                }
+            }else{
+                uint256 commissionAmount = _pending.mul(referralCommissionRate).div(10000);
+                if (commissionAmount > 0){
+                    HSW.mint(safuaddr, commissionAmount);
+                    emit ReferralCommissionPaid(_user, safuaddr, commissionAmount);
+                }
+            }
+        }
     }
 }

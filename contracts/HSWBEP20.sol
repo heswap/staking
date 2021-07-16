@@ -101,11 +101,11 @@ contract HSWBEP20 is Context, IBEP20, Ownable {
         return _totalSupply;
     }
 
-	function preMineSupply() public view returns (uint256) {
+	function preMineSupply() public pure returns (uint256) {
         return _preMineSupply;
     }
 
-    function maxSupply() public view returns (uint256) {
+    function maxSupply() public pure returns (uint256) {
         return _maxSupply;
     }
 
