@@ -4,6 +4,7 @@ import "@openzeppelin/contracts/math/SafeMath.sol";
 import "./libs/IBEP20.sol";
 import "./libs/SafeBEP20.sol";
 import "./libs/IHeswapReferral.sol";
+import "./libs/IMasterChef.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
@@ -20,7 +21,7 @@ interface IMigratorChef {
 // distributed and the community can show to govern itself.
 //
 // Have fun reading it. Hopefully it's bug-free. God bless.
-contract MasterChef is Ownable, ReentrancyGuard {
+contract MasterChef is Ownable, ReentrancyGuard, IMasterChef {
     using SafeMath for uint256;
     using SafeBEP20 for IBEP20;
     // Info of each user.
@@ -266,7 +267,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
     }
 
     // Update bonus
-    function updateBonus(uint256 _pid, uint256 _amount) public {
+    function updateBonus(uint256 _pid, uint256 _amount) public override {
 		require(_pid < bonusInfo.length, "_pid must be less than bonusInfo length");
         BonusInfo storage bonusPool = bonusInfo[_pid];
         bonusPool.bonusToken.safeTransferFrom(address(msg.sender), address(this), _amount);
